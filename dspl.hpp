@@ -84,6 +84,9 @@ const int CommunityDataTag = 5;
 
 static MPI_Datatype commType;
 
+sycl::property_list q_prop{sycl::property::queue::in_order()}; 
+sycl::queue q(q_prop);
+
 void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std::vector<Comm> &localCinfo)
 {
   const GraphElem nv = g.get_lnv();
@@ -121,21 +124,29 @@ GraphWeight distCalcConstantForSecondTerm(const std::vector<GraphWeight> &vDegre
 
   const size_t vsz = vDegree.size();
 
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(shared), shared(vDegree), reduction(+ \
-                                                                     : localWeight) schedule(runtime)
-#else
-#pragma omp parallel for default(shared), shared(vDegree), reduction(+ \
-                                                                     : localWeight) schedule(static)
-#endif
-  for (GraphElem i = 0; i < vsz; i++)
-    localWeight += vDegree[i]; // Local reduction
+  int sumResult = 0;
+  sycl::buffer<int> sumBuf {&sumResult, 1};
+  {
+    sycl::buffer vDegreeBuff(vDegree);
+    // maybe need a buffer for totalEdgeWeightTwice
 
-  // Global reduction
-  MPI_Allreduce(&localWeight, &totalEdgeWeightTwice, 1,
+    q.submit([&](sycl::handler &h) {
+      sycl::accessor vDegreeAcc(vDegreeBuff, h, sycl::write_only);
+      auto sumReduction = sycl::reduction(sumBuf, h, sycl::plus<>());
+
+      h.parallel_for(sycl::range<1>(vsz), sumReduction, [=](auto i, auto& sum) {
+        sum += vDegreeAcc[i];
+      });
+    });
+    q.wait()
+  }
+  localWeight += sumBuf.get_host_access()[0];
+
+    MPI_Allreduce(&localWeight, &totalEdgeWeightTwice, 1,
                 MPI_WEIGHT_TYPE, MPI_SUM, gcomm);
 
   return (1.0 / static_cast<GraphWeight>(totalEdgeWeightTwice));
+
 } // distCalcConstantForSecondTerm
 
 void distInitComm(std::vector<GraphElem> &pastComm, std::vector<GraphElem> &currComm, const GraphElem base)
@@ -146,7 +157,6 @@ void distInitComm(std::vector<GraphElem> &pastComm, std::vector<GraphElem> &curr
   assert(csz == pastComm.size());
 #endif
 
-sycl::queue q;
 {
   sycl::buffer pastCommBuff(pastComm);
   sycl::buffer currCommBuff(currComm);
@@ -187,6 +197,10 @@ void distInitLouvain(const Graph &dg, std::vector<GraphElem> &pastComm,
   distInitComm(pastComm, currComm, base);
 } // distInitLouvain
 
+// cant use stl containers from sycl calls
+// look at sycl usm allocator
+// std vector doesnt just take type as template type
+// can use sycl container allow use of stl containers on gpu
 GraphElem distGetMaxIndex(const std::unordered_map<GraphElem, GraphElem> &clmap, const std::vector<GraphWeight> &counter,
                           const GraphWeight selfLoop, const std::vector<Comm> &localCinfo,
                           const std::map<GraphElem, Comm> &remoteCinfo, const GraphWeight vDegree,
@@ -616,13 +630,13 @@ void fillRemoteCommunities(const Graph &dg, const int me, const int nprocs,
   const GraphElem nv = dg.get_lnv();
   MPI_Comm gcomm = dg.get_comm();
 
-  sycl::queue myQueue;
+  
   {
     sycl::buffer svBuf(svdata);
     sycl::buffer currentCommBuf(currComm);
     sycl::buffer scBuf(scdata);
 
-    myQueue.submit([&](sycl::handler &h) {
+    q.submit([&](sycl::handler &h) {
     sycl::accessor sv(svBuf, h, sycl::read_only);
     sycl::accessor currentComm(currentCommBuf, h, sycl::read_only);
     sycl::accessor sc(scBuf, h, sycl::write_only);
@@ -784,7 +798,6 @@ void fillRemoteCommunities(const Graph &dg, const int me, const int nprocs,
 #endif
   GraphElem stcsz = 0, rtcsz = 0;
 
-  sycl::queue q;
   int sumResult = 0;
   sycl::buffer<int> sumBuf { &sumResult, 1 };
   {
@@ -1123,7 +1136,6 @@ void updateRemoteCommunities(const Graph &dg, std::vector<Comm> &localCinfo,
 #endif
 
 // here
-  sycl::queue q; 
   {
     sycl::buffer szBuf(send_sz);
     sycl::buffer remoteBuf(remoteArray);
@@ -1211,7 +1223,6 @@ void updateRemoteCommunities(const Graph &dg, std::vector<Comm> &localCinfo,
   std::cout << "[" << me << "]Update remote community MPI time: " << (t3 - t2) << std::endl;
 #endif
 
-sycl::queue q;
 {
   sycl::buffer localCinfoBuf(localCinfo);
   sycl::buffer rBuf(rdata);
@@ -1548,7 +1559,6 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const Graph &dg,
       prevMod = lower;
 
 
-sycl::queue q;
 {
   sycl::buffer pastCommBuff(pastComm);
   sycl::buffer currCommBuff(currComm);
