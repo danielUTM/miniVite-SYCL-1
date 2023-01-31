@@ -91,28 +91,56 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
 {
   const GraphElem nv = g.get_lnv();
 
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(runtime)
-#else
-#pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(guided)
-#endif
-  for (GraphElem i = 0; i < nv; i++)
+// #ifdef OMP_SCHEDULE_RUNTIME
+// #pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(runtime)
+// #else
+// #pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(guided)
+// #endif
+//   for (GraphElem i = 0; i < nv; i++)
+//   {
+//     GraphElem e0, e1;
+//     GraphWeight tw = 0.0;
+
+//     g.edge_range(i, e0, e1);
+
+//     for (GraphElem k = e0; k < e1; k++)
+//     {
+//       const Edge &edge = g.get_edge(k);
+//       tw += edge.weight_;
+//     }
+
+//     vDegree[i] = tw;
+
+//     localCinfo[i].degree = tw;
+//     localCinfo[i].size = 1L;
+//   }
   {
-    GraphElem e0, e1;
-    GraphWeight tw = 0.0;
+    sycl::buffer gBuf(g);
+    sycl::buffer vDegreeBuf(vDegree);
+    sycl::buffer localCinfoBuf(localCinfo);
 
-    g.edge_range(i, e0, e1);
+    q.submit([&](sycl::handler &h) {
+      sycl::accessor gAcc(gBuf, h, sycl::read_only);
+      sycl::accessor vDegreeAcc(vDegreeBuf, h, sycl::write_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
 
-    for (GraphElem k = e0; k < e1; k++)
-    {
-      const Edge &edge = g.get_edge(k);
-      tw += edge.weight_;
-    }
+      h.parallel_for<GraphElem>(nv, [=](long i) {
+        GraphElem e0, e1;
+        GraphWeight tw = 0.0;
 
-    vDegree[i] = tw;
+        g.edge_range(i, e0, e1);
 
-    localCinfo[i].degree = tw;
-    localCinfo[i].size = 1L;
+        j.parallel_for<GraphElem>(e1, [=](long i) {
+          const Edge &edge = g.get_edge(k);
+          tw += edge.weight_;
+        });
+
+        vDegreeAcc[i] = tw;
+
+        localCinfoAcc[i].degree = tw;
+        localCinfo[i].size = 1L;
+      });
+    });
   }
 } // distSumVertexDegree
 
@@ -466,26 +494,49 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
   assert((clusterWeight.size() == nv));
 #endif
 
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
-    reduction(+                                                              \
-              : le_xx),                                                      \
-    reduction(+                                                              \
-              : la2_x) schedule(runtime)
-#else
-#pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
-    reduction(+                                                              \
-              : le_xx),                                                      \
-    reduction(+                                                              \
-              : la2_x) schedule(static)
-#endif
-  for (GraphElem i = 0L; i < nv; i++)
+// #ifdef OMP_SCHEDULE_RUNTIME
+// #pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
+//     reduction(+                                                              \
+//               : le_xx),                                                      \
+//     reduction(+                                                              \
+//               : la2_x) schedule(runtime)
+// #else
+// #pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
+//     reduction(+                                                              \
+//               : le_xx),                                                      \
+//     reduction(+                                                              \
+//               : la2_x) schedule(static)
+// #endif
+//   for (GraphElem i = 0L; i < nv; i++)
+//   {
+//     le_xx += clusterWeight[i];
+//     la2_x += static_cast<GraphWeight>(localCinfo[i].degree) * static_cast<GraphWeight>(localCinfo[i].degree);
+//   }
+
+  int sumResult1 = 0;
+  int sumResult2 = 0;
+  sycl::buffer<int> sumBuf1 {&sumResult1, 1};
+  sycl::buffer<int> sumBuf2 {&sumResult2, 1};
   {
-    le_xx += clusterWeight[i];
-    la2_x += static_cast<GraphWeight>(localCinfo[i].degree) * static_cast<GraphWeight>(localCinfo[i].degree);
+    sycl::buffer clusterWeightBuf(clusterWeight);
+    sycl::buffer localCinfoBuf(localCinfo);
+
+    q.submit([&](sycl::handler &h){
+      sycl::accessor clusterWeightAcc(clusterWeightBuf, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfo, h, sycl::read_only);
+      auto sumReduction1 = sycl::reduction(sumBuf1, h, sycl::plus<>());
+      auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
+
+      h.parallel_for(sycl::range<1>(nv), sumReduction1, sumReduction2, [=](auto i, auto& sum1, auto& sum2) {
+        sum1 += clusterWeightAcc[i];
+        sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoBuf[i].degree);
+      });
+    });
+    q.wait();
   }
-  le_la_xx[0] = le_xx;
-  le_la_xx[1] = la2_x;
+
+  le_la_xx[0] = sumBuf1.get_host_access()[0];
+  le_la_xx[1] = sumBuf2.get_host_access()[0];
 
 #ifdef DEBUG_PRINTF
   const double t0 = MPI_Wtime();
