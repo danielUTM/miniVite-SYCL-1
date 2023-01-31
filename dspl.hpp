@@ -529,7 +529,7 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
 
       h.parallel_for(sycl::range<1>(nv), sumReduction1, sumReduction2, [=](auto i, auto& sum1, auto& sum2) {
         sum1 += clusterWeightAcc[i];
-        sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoBuf[i].degree);
+        sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoAcc[i].degree);
       });
     });
     q.wait();
