@@ -91,57 +91,59 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
 {
   const GraphElem nv = g.get_lnv();
 
-// #ifdef OMP_SCHEDULE_RUNTIME
-// #pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(runtime)
-// #else
-// #pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(guided)
-// #endif
-//   for (GraphElem i = 0; i < nv; i++)
-//   {
-//     GraphElem e0, e1;
-//     GraphWeight tw = 0.0;
-
-//     g.edge_range(i, e0, e1);
-
-//     for (GraphElem k = e0; k < e1; k++)
-//     {
-//       const Edge &edge = g.get_edge(k);
-//       tw += edge.weight_;
-//     }
-
-//     vDegree[i] = tw;
-
-//     localCinfo[i].degree = tw;
-//     localCinfo[i].size = 1L;
-//   }
+#ifdef OMP_SCHEDULE_RUNTIME
+#pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(runtime)
+#else
+#pragma omp parallel for default(shared), shared(g, vDegree, localCinfo), schedule(guided)
+#endif
+  for (GraphElem i = 0; i < nv; i++)
   {
-    sycl::buffer gBuf(g);
-    sycl::buffer vDegreeBuf(vDegree);
-    sycl::buffer localCinfoBuf(localCinfo);
+    GraphElem e0, e1;
+    GraphWeight tw = 0.0;
 
-    q.submit([&](sycl::handler &h) {
-      sycl::accessor gAcc(gBuf, h, sycl::read_only);
-      sycl::accessor vDegreeAcc(vDegreeBuf, h, sycl::write_only);
-      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
+    g.edge_range(i, e0, e1);
 
-      h.parallel_for<GraphElem>(nv, [=](long i) {
-        GraphElem e0, e1;
-        GraphWeight tw = 0.0;
+    for (GraphElem k = e0; k < e1; k++)
+    {
+      const Edge &edge = g.get_edge(k);
+      tw += edge.weight_;
+    }
 
-        g.edge_range(i, e0, e1);
+    vDegree[i] = tw;
 
-        j.parallel_for<GraphElem>(e1, [=](long i) {
-          const Edge &edge = g.get_edge(k);
-          tw += edge.weight_;
-        });
-
-        vDegreeAcc[i] = tw;
-
-        localCinfoAcc[i].degree = tw;
-        localCinfo[i].size = 1L;
-      });
-    });
+    localCinfo[i].degree = tw;
+    localCinfo[i].size = 1L;
   }
+
+// broken
+  // {
+  //   sycl::buffer gBuf(g);
+  //   sycl::buffer vDegreeBuf(vDegree);
+  //   sycl::buffer localCinfoBuf(localCinfo);
+
+  //   q.submit([&](sycl::handler &h) {
+  //     // sycl::accessor gAcc(gBuf, h, sycl::read_only);
+  //     sycl::accessor vDegreeAcc(vDegreeBuf, h, sycl::write_only);
+  //     sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
+
+  //     h.parallel_for(nv, [=](GraphElem i) {
+  //       GraphElem e0, e1;
+  //       GraphWeight tw = 0.0;
+
+  //       // g.edge_range(i, e0, e1);
+
+  //       // // h.parallel_for(e1, [=](long k = e0) {
+  //       // //   const Edge &edge = g.get_edge(k);
+  //       // //   tw += edge.weight_;
+  //       // // });
+
+  //       // vDegreeAcc[i] = tw;
+
+  //       // localCinfoAcc[i].degree = tw;
+  //       // localCinfoAcc[i].size = 1L;
+  //     });
+  //   });
+  // }
 } // distSumVertexDegree
 
 GraphWeight distCalcConstantForSecondTerm(const std::vector<GraphWeight> &vDegree, MPI_Comm gcomm)
@@ -166,7 +168,7 @@ GraphWeight distCalcConstantForSecondTerm(const std::vector<GraphWeight> &vDegre
         sum += vDegreeAcc[i];
       });
     });
-    q.wait()
+    q.wait();
   }
   localWeight += sumBuf.get_host_access()[0];
 
@@ -494,25 +496,6 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
   assert((clusterWeight.size() == nv));
 #endif
 
-// #ifdef OMP_SCHEDULE_RUNTIME
-// #pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
-//     reduction(+                                                              \
-//               : le_xx),                                                      \
-//     reduction(+                                                              \
-//               : la2_x) schedule(runtime)
-// #else
-// #pragma omp parallel for default(shared), shared(clusterWeight, localCinfo), \
-//     reduction(+                                                              \
-//               : le_xx),                                                      \
-//     reduction(+                                                              \
-//               : la2_x) schedule(static)
-// #endif
-//   for (GraphElem i = 0L; i < nv; i++)
-//   {
-//     le_xx += clusterWeight[i];
-//     la2_x += static_cast<GraphWeight>(localCinfo[i].degree) * static_cast<GraphWeight>(localCinfo[i].degree);
-//   }
-
   int sumResult1 = 0;
   int sumResult2 = 0;
   sycl::buffer<int> sumBuf1 {&sumResult1, 1};
@@ -523,18 +506,35 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
 
     q.submit([&](sycl::handler &h){
       sycl::accessor clusterWeightAcc(clusterWeightBuf, h, sycl::read_only);
-      sycl::accessor localCinfoAcc(localCinfo, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
       auto sumReduction1 = sycl::reduction(sumBuf1, h, sycl::plus<>());
+      // auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
+
+      // h.parallel_for(sycl::range<1>(nv), sumReduction1, sumReduction2, [=](GraphElem i, auto& sum1, auto& sum2) {
+      //   sum1 += clusterWeightAcc[i];
+      //   sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoAcc[i].degree);
+      // });
+
+      h.parallel_for(sycl::range<1>(nv), sumReduction1, [=](GraphElem i, auto& sum1) {
+        sum1 += clusterWeightAcc[i];
+      });
+    });
+    q.wait();
+
+    q.submit([&](sycl::handler &h){
+      sycl::accessor clusterWeightAcc(clusterWeightBuf, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
       auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
 
-      h.parallel_for(sycl::range<1>(nv), sumReduction1, sumReduction2, [=](auto i, auto& sum1, auto& sum2) {
-        sum1 += clusterWeightAcc[i];
+      h.parallel_for(sycl::range<1>(nv), sumReduction2, [=](GraphElem i, auto& sum2) {
         sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoAcc[i].degree);
       });
     });
     q.wait();
   }
 
+  // le_la_xx[0] = le_xx;
+  // le_la_xx[1] = la2_x;
   le_la_xx[0] = sumBuf1.get_host_access()[0];
   le_la_xx[1] = sumBuf2.get_host_access()[0];
 
@@ -877,19 +877,22 @@ void fillRemoteCommunities(const Graph &dg, const int me, const int nprocs,
   ta += (t1 - t0);
 #endif
 
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for shared(rcsizes) \
-    reduction(+                          \
-              : rtcsz) schedule(runtime)
-#else
-#pragma omp parallel for shared(rcsizes) \
-    reduction(+                          \
-              : rtcsz) schedule(static)
-#endif
-  for (int i = 0; i < nprocs; i++)
-  {
-    rtcsz += rcsizes[i];
-  }
+sumResult = 0;
+sycl::buffer<int> sumBuf2 { &sumResult, 1 };
+{
+  sycl::buffer rcSizesBuf(rcsizes);
+
+  q.submit([&](sycl::handler &h) {
+    sycl::accessor rcAcc(rcSizesBuf, h, sycl::read_only);
+    auto sumReduction = sycl::reduction(sumBuf2, h, sycl::plus<>());
+
+    h.parallel_for(sycl::range<1>(nprocs), sumReduction, [=](auto i, auto& sum) {
+        sum += rcAcc[i];
+      });
+  });
+  q.wait();
+}
+rtcsz += sumBuf2.get_host_access()[0];
 
 #ifdef DEBUG_PRINTF
   std::cout << "[" << me << "]Total communities to receive: " << rtcsz << std::endl;
@@ -1210,6 +1213,8 @@ void updateRemoteCommunities(const Graph &dg, std::vector<Comm> &localCinfo,
 #endif
 
   GraphElem rcnt = 0, scnt = 0;
+
+// this can be done like previous multiple variable reduction but check if better way of doing
 #ifdef OMP_SCHEDULE_RUNTIME
 #pragma omp parallel for shared(recv_sz, send_sz) \
     reduction(+                                   \
@@ -1382,19 +1387,34 @@ void exchangeVertexReqs(const Graph &dg, size_t &ssz, size_t &rsz,
   MPI_Alltoall(ssizes.data(), 1, MPI_GRAPH_TYPE, rsizes.data(),
                1, MPI_GRAPH_TYPE, gcomm);
 
-  GraphElem rsz_r = 0;
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for shared(rsizes) \
-    reduction(+                         \
-              : rsz_r) schedule(runtime)
-#else
-#pragma omp parallel for shared(rsizes) \
-    reduction(+                         \
-              : rsz_r) schedule(static)
-#endif
-  for (int i = 0; i < nprocs; i++)
-    rsz_r += rsizes[i];
-  rsz = rsz_r;
+// #ifdef OMP_SCHEDULE_RUNTIME
+// #pragma omp parallel for shared(rsizes) \
+//     reduction(+                         \
+//               : rsz_r) schedule(runtime)
+// #else
+// #pragma omp parallel for shared(rsizes) \
+//     reduction(+                         \
+//               : rsz_r) schedule(static)
+// #endif
+//   for (int i = 0; i < nprocs; i++)
+//     rsz_r += rsizes[i];
+
+GraphElem rsz_r = 0;
+sycl::buffer<GraphElem> sumBuf {&rsz_r, 1};
+{
+  sycl::buffer rsizesBuf(rsizes);
+
+  q.submit([&](sycl::handler &h) {
+      sycl::accessor rsizesAcc(rsizesBuf, h, sycl::read_write);
+      auto sumReduction = sycl::reduction(sumBuf, h, sycl::plus<>());
+
+      h.parallel_for(sycl::range<1>(nprocs), sumReduction, [=](auto i, auto& sum) {
+        sum += rsizesAcc[i];
+      });
+    });
+    q.wait();
+}
+  rsz = sumBuf.get_host_access()[0];
 
   svdata.resize(ssz);
   rvdata.resize(rsz);
