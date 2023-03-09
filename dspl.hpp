@@ -98,6 +98,7 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
 #endif
   for (GraphElem i = 0; i < nv; i++)
   {
+    // std::cout << omp_get_thread_num() << std::endl;
     GraphElem e0, e1;
     GraphWeight tw = 0.0;
 
@@ -116,6 +117,8 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
   }
 
 // broken
+// use sycl allocator
+// interplay of buffer of class object in combination with sycl allocator
   // {
   //   sycl::buffer gBuf(g);
   //   sycl::buffer vDegreeBuf(vDegree);
@@ -201,6 +204,23 @@ void distInitComm(std::vector<GraphElem> &pastComm, std::vector<GraphElem> &curr
     });   
   });
 }
+
+// delete this when done
+
+// q.submit([&](cl::sycl::handler &cgh)
+// {
+// sycl::stream out(1024, 256, cgh);
+// cgh.parallel_for<class kernel>(
+// sycl::nd_range<1>(sycl::range<1>(8), sycl::range<1>(8)),
+// [=](sycl::nd_item<1> ndi)
+// {
+// size_t gi = ndi.get_global_id();
+// size_t li = ndi.get_local_id();
+// // printf("gi: %d, li: %d ", gi, li);
+// out << "gi: " << gi << " " << "li: " << li << " " << sycl::endl;
+// });
+
+// });
 
 } // distInitComm
 
@@ -409,47 +429,130 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     assert(cc - base < localCupdate.size());
     assert(localTarget - base < localCupdate.size());
 #endif
-#pragma omp atomic update
-    localCupdate[localTarget - base].degree += vDegree[i];
-#pragma omp atomic update
-    localCupdate[localTarget - base].size++;
-#pragma omp atomic update
-    localCupdate[cc - base].degree -= vDegree[i];
-#pragma omp atomic update
-    localCupdate[cc - base].size--;
+// #pragma omp atomic update
+//     localCupdate[localTarget - base].degree += vDegree[i];
+// #pragma omp atomic update
+//     localCupdate[localTarget - base].size++;
+// #pragma omp atomic update
+//     localCupdate[cc - base].degree -= vDegree[i];
+// #pragma omp atomic update
+//     localCupdate[cc - base].size--;
+
+  {
+  sycl::buffer localCBuff(localCupdate);
+  sycl::buffer vDegreeBuff(vDegree);
+  q.submit([&](sycl::handler &h) {
+    sycl::accessor localCAcc(localCBuff, h, sycl::read_write);
+    sycl::accessor vDegreeAcc(vDegreeBuff, h, sycl::read_only);
+
+   h.parallel_for(1, [=](int j) {
+    auto targetBaseDegree = sycl::ext::oneapi::atomic_ref<
+            GraphWeight, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[localTarget - base].degree);
+    targetBaseDegree += vDegreeAcc[i];
+    auto targetBaseSize = sycl::ext::oneapi::atomic_ref<
+            GraphElem, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[localTarget - base].size);
+    targetBaseSize++;
+
+    auto ccBaseDegree = sycl::ext::oneapi::atomic_ref<
+            GraphWeight, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[cc - base].degree);
+    ccBaseDegree -= vDegreeAcc[i];
+    auto ccBaseSize = sycl::ext::oneapi::atomic_ref<
+            GraphElem, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[cc - base].size);
+    ccBaseSize--;
+    });   
+  });
+  q.wait();
+}
+
   }
 
   // current is local, target is not - do atomic on local, accumulate in Maps for remote
   if ((localTarget != cc) && (localTarget != -1) && currCommIsLocal && !targetCommIsLocal)
   {
-#pragma omp atomic update
-    localCupdate[cc - base].degree -= vDegree[i];
-#pragma omp atomic update
-    localCupdate[cc - base].size--;
+// #pragma omp atomic update
+//     localCupdate[cc - base].degree -= vDegree[i];
+// #pragma omp atomic update
+//     localCupdate[cc - base].size--;
+  {
+  sycl::buffer localCBuff(localCupdate);
+  sycl::buffer vDegreeBuff(vDegree);
+  q.submit([&](sycl::handler &h) {
+    sycl::accessor localCAcc(localCBuff, h, sycl::read_write);
+    sycl::accessor vDegreeAcc(vDegreeBuff, h, sycl::read_only);
+
+   h.parallel_for(1, [=](int j) {
+    auto ccBaseDegree = sycl::ext::oneapi::atomic_ref<
+            GraphWeight, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[cc - base].degree);
+    ccBaseDegree -= vDegreeAcc[i];
+    auto ccBaseSize = sycl::ext::oneapi::atomic_ref<
+            GraphElem, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[cc - base].size);
+    ccBaseSize--;
+    });   
+  });
+  q.wait();
+}
 
     // search target!
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(localTarget);
 
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.degree += vDegree[i];
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.size++;
-  }
+}
+
+
 
   // current is remote, target is local - accumulate for current, atomic on local
   if ((localTarget != cc) && (localTarget != -1) && !currCommIsLocal && targetCommIsLocal)
   {
-#pragma omp atomic update
-    localCupdate[localTarget - base].degree += vDegree[i];
-#pragma omp atomic update
-    localCupdate[localTarget - base].size++;
+// #pragma omp atomic update
+//     localCupdate[localTarget - base].degree += vDegree[i];
+// #pragma omp atomic update
+//     localCupdate[localTarget - base].size++;
+
+  {
+  sycl::buffer localCBuff(localCupdate);
+  sycl::buffer vDegreeBuff(vDegree);
+  q.submit([&](sycl::handler &h) {
+    sycl::accessor localCAcc(localCBuff, h, sycl::read_write);
+    sycl::accessor vDegreeAcc(vDegreeBuff, h, sycl::read_only);
+
+   h.parallel_for(1, [=](int j) {
+    auto targetBaseDegree = sycl::ext::oneapi::atomic_ref<
+            GraphWeight, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[localTarget - base].degree);
+    targetBaseDegree += vDegreeAcc[i];
+    auto targetBaseSize = sycl::ext::oneapi::atomic_ref<
+            GraphElem, sycl::ext::oneapi::memory_order::relaxed,
+            sycl::ext::oneapi::memory_scope::device,
+            sycl::access::address_space::global_space>(localCAcc[localTarget - base].size);
+    targetBaseSize++;
+
+    });   
+  });
+  q.wait();
+}
 
     // search current
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(cc);
 
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.degree -= vDegree[i];
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.size--;
   }
 
@@ -460,17 +563,17 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     // search current
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(cc);
 
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.degree -= vDegree[i];
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.size--;
 
     // search target
     iter = remoteCupdate.find(localTarget);
 
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.degree += vDegree[i];
-#pragma omp atomic update
+// #pragma omp atomic update
     iter->second.size++;
   }
 
@@ -510,7 +613,7 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
       auto sumReduction1 = sycl::reduction(sumBuf1, h, sycl::plus<>());
       // auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
 
-      // h.parallel_for(sycl::range<1>(nv), sumReduction1, sumReduction2, [=](GraphElem i, auto& sum1, auto& sum2) {
+      // h.parallel_for(sycl::range<1>{4}, sumReduction1, sumReduction2, [=](id<1> i, auto& sum1, auto& sum2) {
       //   sum1 += clusterWeightAcc[i];
       //   sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoAcc[i].degree);
       // });
