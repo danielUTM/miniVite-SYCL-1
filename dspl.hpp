@@ -98,10 +98,10 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
 #endif
   for (GraphElem i = 0; i < nv; i++)
   {
-    // std::cout << omp_get_thread_num() << std::endl;
     GraphElem e0, e1;
     GraphWeight tw = 0.0;
 
+    // function call
     g.edge_range(i, e0, e1);
 
     for (GraphElem k = e0; k < e1; k++)
@@ -115,6 +115,27 @@ void distSumVertexDegree(const Graph &g, std::vector<GraphWeight> &vDegree, std:
     localCinfo[i].degree = tw;
     localCinfo[i].size = 1L;
   }
+
+  // {
+  //   sycl::buffer vDegreeBuf(vDegree);
+  //   sycl::buffer localCinfoBuf(localCinfo);
+  //   // sycl::buffer gBuf(g);
+
+  //   q.submit([&](sycl::handler &h) {
+  //     sycl::accessor vDegreeAcc(vDegreeBuf, h, sycl::write_only);
+  //     sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
+
+  //     h.parallel_for(nv, [=](GraphElem i) {
+  //       GraphElem e0, e1;
+  //       GraphWeight tw = 0.0;
+
+  //       // g.edge_range(i, e0, e1);
+  //       h.single_task<Graph>([=]() {
+  //         g.edge_range(i, e0, e1);
+  //       });
+  //     });
+  //   });
+  // }
 
 // broken
 // use sycl allocator
@@ -429,14 +450,6 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     assert(cc - base < localCupdate.size());
     assert(localTarget - base < localCupdate.size());
 #endif
-// #pragma omp atomic update
-//     localCupdate[localTarget - base].degree += vDegree[i];
-// #pragma omp atomic update
-//     localCupdate[localTarget - base].size++;
-// #pragma omp atomic update
-//     localCupdate[cc - base].degree -= vDegree[i];
-// #pragma omp atomic update
-//     localCupdate[cc - base].size--;
 
   {
   sycl::buffer localCBuff(localCupdate);
@@ -477,10 +490,6 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
   // current is local, target is not - do atomic on local, accumulate in Maps for remote
   if ((localTarget != cc) && (localTarget != -1) && currCommIsLocal && !targetCommIsLocal)
   {
-// #pragma omp atomic update
-//     localCupdate[cc - base].degree -= vDegree[i];
-// #pragma omp atomic update
-//     localCupdate[cc - base].size--;
   {
   sycl::buffer localCBuff(localCupdate);
   sycl::buffer vDegreeBuff(vDegree);
@@ -507,9 +516,7 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     // search target!
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(localTarget);
 
-// #pragma omp atomic update
     iter->second.degree += vDegree[i];
-// #pragma omp atomic update
     iter->second.size++;
 }
 
@@ -518,10 +525,6 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
   // current is remote, target is local - accumulate for current, atomic on local
   if ((localTarget != cc) && (localTarget != -1) && !currCommIsLocal && targetCommIsLocal)
   {
-// #pragma omp atomic update
-//     localCupdate[localTarget - base].degree += vDegree[i];
-// #pragma omp atomic update
-//     localCupdate[localTarget - base].size++;
 
   {
   sycl::buffer localCBuff(localCupdate);
@@ -550,9 +553,7 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     // search current
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(cc);
 
-// #pragma omp atomic update
     iter->second.degree -= vDegree[i];
-// #pragma omp atomic update
     iter->second.size--;
   }
 
@@ -563,17 +564,13 @@ void distExecuteLouvainIteration(const GraphElem i, const Graph &dg, const std::
     // search current
     std::map<GraphElem, Comm>::iterator iter = remoteCupdate.find(cc);
 
-// #pragma omp atomic update
     iter->second.degree -= vDegree[i];
-// #pragma omp atomic update
     iter->second.size--;
 
     // search target
     iter = remoteCupdate.find(localTarget);
 
-// #pragma omp atomic update
     iter->second.degree += vDegree[i];
-// #pragma omp atomic update
     iter->second.size++;
   }
 
@@ -611,12 +608,6 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
       sycl::accessor clusterWeightAcc(clusterWeightBuf, h, sycl::read_only);
       sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
       auto sumReduction1 = sycl::reduction(sumBuf1, h, sycl::plus<>());
-      // auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
-
-      // h.parallel_for(sycl::range<1>{4}, sumReduction1, sumReduction2, [=](id<1> i, auto& sum1, auto& sum2) {
-      //   sum1 += clusterWeightAcc[i];
-      //   sum2 += static_cast<GraphWeight>(localCinfoAcc[i].degree) * static_cast<GraphWeight>(localCinfoAcc[i].degree);
-      // });
 
       h.parallel_for(sycl::range<1>(nv), sumReduction1, [=](GraphElem i, auto& sum1) {
         sum1 += clusterWeightAcc[i];
@@ -665,50 +656,45 @@ GraphWeight distComputeModularity(const Graph &g, std::vector<Comm> &localCinfo,
 void distUpdateLocalCinfo(std::vector<Comm> &localCinfo, const std::vector<Comm> &localCupdate)
 {
   size_t csz = localCinfo.size();
-
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp for schedule(runtime)
-#else
-#pragma omp for schedule(static)
-#endif
-  for (GraphElem i = 0L; i < csz; i++)
   {
-    localCinfo[i].size += localCupdate[i].size;
-    localCinfo[i].degree += localCupdate[i].degree;
+    sycl::buffer localCinfoBuf(localCinfo);
+    sycl::buffer localCupdateBuf(localCupdate);
+
+    q.submit([&](sycl::handler &h){
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
+      sycl::accessor localCupdateAcc(localCupdateBuf, h, sycl::read_only);
+
+      h.parallel_for(sycl::range<1>(csz), [=](GraphElem i) {
+        localCinfoAcc[i].size += localCupdateAcc[i].size;
+        localCinfoAcc[i].degree += localCupdateAcc[i].degree;
+      });
+    });
+    q.wait();
   }
-
-  // DONT DELETE
-  // sycl::queue q;
-  // {
-  //   sycl::buffer localCinfoBuf(localCinfo);
-  //   sycl::buffer localCupdateBuf(localCupdate);
-
-  //   q.submit([&](sycl::handler &h) {
-  //     sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::write_only);
-  //     sycl::accessor localCupdateAcc(localCupdateBuf, h, sycl::read_only);
-
-  //     h.parallel_for(csz, [=](long i) {
-  //       localCinfoAcc[i].size += localCupdateAcc[i].size;
-  //       localCinfoAcc[i].degree += localCupdateAcc[i].degree;
-  //     });
-  //   });
-  // }
 }
 
 void distCleanCWandCU(const GraphElem nv, std::vector<GraphWeight> &clusterWeight,
                       std::vector<Comm> &localCupdate)
 {
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp for schedule(runtime)
-#else
-#pragma omp for schedule(static)
-#endif
-  for (GraphElem i = 0L; i < nv; i++)
-  {
-    clusterWeight[i] = 0;
-    localCupdate[i].degree = 0;
-    localCupdate[i].size = 0;
-  }
+
+{
+  sycl::buffer clusterWeightBuf(clusterWeight);
+  sycl::buffer localCupdateBuf(localCupdate);
+
+  q.submit([&](sycl::handler &h){
+    sycl::accessor clusterWeightAcc(clusterWeightBuf, h, sycl::write_only);
+    sycl::accessor localCupdateAcc(localCupdateBuf, h, sycl::write_only);
+
+    h.parallel_for(sycl::range<1>(nv), [=](GraphElem i) {
+      clusterWeightAcc[i] = 0;
+      localCupdateAcc[i].degree = 0;
+      localCupdateAcc[i].size = 0;
+    });
+  });
+  q.wait();
+
+}
+
 } // distCleanCWandCU
 
 #if defined(USE_MPI_RMA)
@@ -1041,18 +1027,24 @@ rtcsz += sumBuf2.get_host_access()[0];
   {
     if (i != me)
     {
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(none), shared(rcsizes, rcomms, localCinfo, sinfo, rdispls), \
-    firstprivate(i, base), schedule(runtime), if (rcsizes[i] >= 1000)
-#else
-#pragma omp parallel for default(none), shared(rcsizes, rcomms, localCinfo, sinfo, rdispls), \
-    firstprivate(i, base), schedule(guided), if (rcsizes[i] >= 1000)
-#endif
-      for (GraphElem j = 0; j < rcsizes[i]; j++)
+
       {
-        const GraphElem comm = rcomms[rdispls[i] + j];
-        sinfo[rdispls[i] + j] = {comm, localCinfo[comm - base].size, localCinfo[comm - base].degree};
-      }
+      sycl::buffer rcommsBuf(rcomms);
+      sycl::buffer localCinfoBuf(localCinfo);
+      sycl::buffer sinfoBuf(sinfo);
+
+    q.submit([&](sycl::handler &h) {
+      sycl::accessor rcommsAcc(rcommsBuf, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
+      sycl::accessor sinfoAcc(sinfoBuf, h, sycl::read_write);
+
+      h.parallel_for(rcsizes[i], [=](GraphElem j) {
+        const GraphElem comm = rcommsAcc[rdispls[i] + j];
+        sinfoAcc[rdispls[i] + j] = {comm, localCinfoAcc[comm - base].size, localCinfoAcc[comm - base].degree};
+      });
+    });
+    }
+
     }
   }
 
@@ -1132,19 +1124,22 @@ rtcsz += sumBuf2.get_host_access()[0];
     if (i != me)
     {
 #if defined(USE_MPI_SENDRECV)
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(none), shared(rcsizes, rcomms, localCinfo, sinfo), \
-    firstprivate(i, rpos, base), schedule(runtime), if (rcsizes[i] >= 1000)
-
-#else
-#pragma omp parallel for default(none), shared(rcsizes, rcomms, localCinfo, sinfo), \
-    firstprivate(i, rpos, base), schedule(guided), if (rcsizes[i] >= 1000)
-#endif
-      for (GraphElem j = 0; j < rcsizes[i]; j++)
       {
-        const GraphElem comm = rcomms[rpos + j];
-        sinfo[rpos + j] = {comm, localCinfo[comm - base].size, localCinfo[comm - base].degree};
-      }
+      sycl::buffer rcommsBuf(rcomms);
+      sycl::buffer localCinfoBuf(localCinfo);
+      sycl::buffer sinfoBuf(sinfo);
+
+    q.submit([&](sycl::handler &h) {
+      sycl::accessor rcommsAcc(rcommsBuf, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
+      sycl::accessor sinfoAcc(sinfoBuf, h, sycl::read_write);
+
+      h.parallel_for(rcsizes[i], [=](GraphElem j) {
+        const GraphElem comm = rcommsAcc[rpos + j];
+        sinfoAcc[rpos + j] = {comm, localCinfoAcc[comm - base].size, localCinfoAcc[comm - base].degree};
+      });
+    });
+    }
 
       MPI_Sendrecv(sinfo.data() + rpos, rcsizes[i], commType, i, CommunityDataTag,
                    rinfo.data() + spos, scsizes[i], commType, i, CommunityDataTag,
@@ -1170,18 +1165,23 @@ rtcsz += sumBuf2.get_host_access()[0];
       }
 #endif
 
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for default(shared), shared(rcsizes, rcomms, localCinfo, sinfo), \
-    firstprivate(i, rpos, base), schedule(runtime), if (rcsizes[i] >= 1000)
-#else
-#pragma omp parallel for default(shared), shared(rcsizes, rcomms, localCinfo, sinfo), \
-    firstprivate(i, rpos, base), schedule(guided), if (rcsizes[i] >= 1000)
-#endif
-      for (GraphElem j = 0; j < rcsizes[i]; j++)
-      {
-        const GraphElem comm = rcomms[rpos + j];
-        sinfo[rpos + j] = {comm, localCinfo[comm - base].size, localCinfo[comm - base].degree};
-      }
+// here
+    {
+      sycl::buffer rcommsBuf(rcomms);
+      sycl::buffer localCinfoBuf(localCinfo);
+      sycl::buffer sinfoBuf(sinfo);
+
+    q.submit([&](sycl::handler &h) {
+      sycl::accessor rcommsAcc(rcommsBuf, h, sycl::read_only);
+      sycl::accessor localCinfoAcc(localCinfoBuf, h, sycl::read_only);
+      sycl::accessor sinfoAcc(sinfoBuf, h, sycl::read_write);
+
+      h.parallel_for(rcsizes[i], [=](GraphElem j) {
+        const GraphElem comm = rcommsAcc[rpos + j];
+        sinfoAcc[rpos + j] = {comm, localCinfoAcc[comm - base].size, localCinfoAcc[comm - base].degree};
+      });
+    });
+    }
 
       if (rcsizes[i] > 0)
       {
@@ -1292,7 +1292,6 @@ void updateRemoteCommunities(const Graph &dg, std::vector<Comm> &localCinfo,
   const double t0 = MPI_Wtime();
 #endif
 
-// here
   {
     sycl::buffer szBuf(send_sz);
     sycl::buffer remoteBuf(remoteArray);
@@ -1317,21 +1316,37 @@ void updateRemoteCommunities(const Graph &dg, std::vector<Comm> &localCinfo,
 
   GraphElem rcnt = 0, scnt = 0;
 
-// this can be done like previous multiple variable reduction but check if better way of doing
-#ifdef OMP_SCHEDULE_RUNTIME
-#pragma omp parallel for shared(recv_sz, send_sz) \
-    reduction(+                                   \
-              : rcnt, scnt) schedule(runtime)
-#else
-#pragma omp parallel for shared(recv_sz, send_sz) \
-    reduction(+                                   \
-              : rcnt, scnt) schedule(static)
-#endif
-  for (int i = 0; i < nprocs; i++)
+  int sumResult1 = 0;
+  int sumResult2 = 0;
+  sycl::buffer<int> sumBuf1 {&sumResult1, 1};
+  sycl::buffer<int> sumBuf2 {&sumResult2, 1};
   {
-    rcnt += recv_sz[i];
-    scnt += send_sz[i];
+    sycl::buffer recv_sztBuf(recv_sz);
+    sycl::buffer send_szBuf(send_sz);
+
+    q.submit([&](sycl::handler &h){
+      sycl::accessor recv_szAcc(recv_sztBuf, h, sycl::read_only);
+      auto sumReduction1 = sycl::reduction(sumBuf1, h, sycl::plus<>());
+
+      h.parallel_for(sycl::range<1>(nprocs), sumReduction1, [=](int i, auto& sum1) {
+        sum1 += recv_szAcc[i];
+      });
+    });
+    q.wait();
+
+    q.submit([&](sycl::handler &h){
+      sycl::accessor send_szAcc(send_szBuf, h, sycl::read_only);
+      auto sumReduction2 = sycl::reduction(sumBuf2, h, sycl::plus<>());
+
+      h.parallel_for(sycl::range<1>(nprocs), sumReduction2, [=](int i, auto& sum2) {
+        sum2 += send_szAcc[i];
+      });
+    });
+    q.wait();
   }
+  rcnt += sumBuf1.get_host_access()[0];
+  scnt += sumBuf2.get_host_access()[0];
+
 #ifdef DEBUG_PRINTF
   std::cout << "[" << me << "]Total number of remote communities to update: " << scnt << std::endl;
 #endif
@@ -1442,6 +1457,7 @@ void exchangeVertexReqs(const Graph &dg, size_t &ssz, size_t &rsz,
     {
       GraphElem e0, e1;
 
+      // function call
       dg.edge_range(i, e0, e1);
 
       for (GraphElem j = e0; j < e1; j++)
@@ -1489,18 +1505,6 @@ void exchangeVertexReqs(const Graph &dg, size_t &ssz, size_t &rsz,
 
   MPI_Alltoall(ssizes.data(), 1, MPI_GRAPH_TYPE, rsizes.data(),
                1, MPI_GRAPH_TYPE, gcomm);
-
-// #ifdef OMP_SCHEDULE_RUNTIME
-// #pragma omp parallel for shared(rsizes) \
-//     reduction(+                         \
-//               : rsz_r) schedule(runtime)
-// #else
-// #pragma omp parallel for shared(rsizes) \
-//     reduction(+                         \
-//               : rsz_r) schedule(static)
-// #endif
-//   for (int i = 0; i < nprocs; i++)
-//     rsz_r += rsizes[i];
 
 GraphElem rsz_r = 0;
 sycl::buffer<GraphElem> sumBuf {&rsz_r, 1};
@@ -1695,10 +1699,12 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const Graph &dg,
     t0 = MPI_Wtime();
 #endif
 
+distCleanCWandCU(nv, clusterWeight, localCupdate);
+
 #pragma omp parallel default(shared), shared(clusterWeight, localCupdate, currComm, targetComm, vDegree, localCinfo, remoteCinfo, remoteComm, pastComm, dg, remoteCupdate), \
     firstprivate(constantForSecondTerm, me)
     {
-      distCleanCWandCU(nv, clusterWeight, localCupdate);
+      // distCleanCWandCU(nv, clusterWeight, localCupdate);
 
 #ifdef OMP_SCHEDULE_RUNTIME
 #pragma omp for schedule(runtime)
@@ -1713,10 +1719,21 @@ GraphWeight distLouvainMethod(const int me, const int nprocs, const Graph &dg,
       }
     }
 
-#pragma omp parallel default(none), shared(localCinfo, localCupdate)
-    {
+// // function call
+// {
+//   q.submit([&](sycl::handler &h) {
+      
+//     h.parallel_for(nv, [=](GraphElem i) {
+//       // distExecuteLouvainIteration(i, dg, currComm, targetComm, vDegree, localCinfo,
+//       //                               localCupdate, remoteComm, remoteCinfo, remoteCupdate,
+//       //                               constantForSecondTerm, clusterWeight, me);
+//     });
+//   });
+// }
+
+    
       distUpdateLocalCinfo(localCinfo, localCupdate);
-    }
+    
 
     // communicate remote communities
     updateRemoteCommunities(dg, localCinfo, remoteCupdate, me, nprocs);
